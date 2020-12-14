@@ -1,4 +1,7 @@
-# linfa
+<img align="left" src="./mascot.svg" width="70px" height="70px" alt="Linfa mascot icon">
+
+# Linfa
+
 [![crates.io](https://img.shields.io/crates/v/linfa.svg)](https://crates.io/crates/linfa)
 [![Documentation](https://docs.rs/linfa/badge.svg)](https://docs.rs/linfa)
 [![Codequality](https://github.com/rust-ml/linfa/workflows/Codequality%20Lints/badge.svg)](https://github.com/rust-ml/linfa/actions?query=workflow%3A%22Codequality+Lints%22)
@@ -37,6 +40,22 @@ Where does `linfa` stand right now? [Are we learning yet?](http://www.arewelearn
 We believe that only a significant community effort can nurture, build, and sustain a machine learning ecosystem in Rust - there is no other way forward.
 
 If this strikes a chord with you, please take a look at the [roadmap](https://github.com/rust-ml/linfa/issues/7) and get involved!
+
+## BLAS/Lapack backend
+
+At the moment you can choose between the following BLAS/LAPACK backends: `openblas`, `netblas` or `intel-mkl`
+
+|Backend  | Linux | Windows | macOS |
+|:--------|:-----:|:-------:|:-----:|
+|OpenBLAS |✔️      |-        |-      |
+|Netlib   |✔️      |-        |-      |
+|Intel MKL|✔️      |✔️        |✔️      |
+
+For example if you want to use the system IntelMKL library for the PCA example, then pass the corresponding feature:
+```
+cd linfa-reduction && cargo run --release --example pca --features linfa/intel-mkl-system
+```
+This selects the `intel-mkl` system library as BLAS/LAPACK backend. On the other hand if you want to compile the library and link it with the generated artifacts, pass `intel-mkl-static`.
 
 # License
 Dual-licensed to be compatible with the Rust project.

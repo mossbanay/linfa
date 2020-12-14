@@ -1,7 +1,18 @@
-use linfa::{Float, Label};
+use linfa::{
+    error::{Error, Result},
+    Float, Label,
+};
 use std::marker::PhantomData;
 
+#[cfg(feature = "serde")]
+use serde_crate::{Deserialize, Serialize};
+
 /// The possible impurity measures for training.
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(crate = "serde_crate")
+)]
 #[derive(Clone, Copy, Debug)]
 pub enum SplitQuality {
     Gini,
@@ -10,6 +21,11 @@ pub enum SplitQuality {
 
 /// The set of hyperparameters that can be specified for fitting a
 /// [decision tree](struct.DecisionTree.html).
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(crate = "serde_crate")
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct DecisionTreeParams<F, L> {
     pub split_quality: SplitQuality,
@@ -44,5 +60,16 @@ impl<F: Float, L: Label> DecisionTreeParams<F, L> {
     pub fn min_impurity_decrease(mut self, min_impurity_decrease: F) -> Self {
         self.min_impurity_decrease = min_impurity_decrease;
         self
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.min_impurity_decrease < F::epsilon() {
+            return Err(Error::Parameters(format!(
+                "Minimum impurity decrease should be greater than zero, but was {}",
+                self.min_impurity_decrease
+            )));
+        }
+
+        Ok(())
     }
 }

@@ -4,13 +4,19 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-use crate::decision_trees::hyperparameters::{DecisionTreeParams, SplitQuality};
+use ndarray::{ArrayBase, Axis, Data, Ix1, Ix2};
+
+use super::hyperparameters::{DecisionTreeParams, SplitQuality};
+use super::NodeIter;
+use super::Tikz;
 use linfa::{
     dataset::{Labels, Records},
     traits::*,
     Dataset, Float, Label,
 };
-use ndarray::{ArrayBase, Axis, Data, Ix1, Ix2};
+
+#[cfg(feature = "serde")]
+use serde_crate::{Deserialize, Serialize};
 
 /// RowMask tracks observations
 ///
@@ -61,6 +67,11 @@ impl<F: Float> SortedIndex<F> {
     }
 }
 
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(crate = "serde_crate")
+)]
 #[derive(Debug, Clone)]
 /// A node in the decision tree
 pub struct TreeNode<F, L> {
@@ -71,6 +82,7 @@ pub struct TreeNode<F, L> {
     right_child: Option<Box<TreeNode<F, L>>>,
     leaf_node: bool,
     prediction: L,
+    depth: usize,
 }
 
 impl<F: Float, L: Label> Hash for TreeNode<F, L> {
@@ -83,8 +95,6 @@ impl<F: Float, L: Label> Hash for TreeNode<F, L> {
     }
 }
 
-impl<F, L> Eq for TreeNode<F, L> {}
-
 impl<F, L> PartialEq for TreeNode<F, L> {
     fn eq(&self, other: &Self) -> bool {
         self.feature_idx == other.feature_idx
@@ -92,7 +102,7 @@ impl<F, L> PartialEq for TreeNode<F, L> {
 }
 
 impl<F: Float, L: Label + std::fmt::Debug> TreeNode<F, L> {
-    fn empty_leaf(prediction: L) -> Self {
+    fn empty_leaf(prediction: L, depth: usize) -> Self {
         TreeNode {
             feature_idx: 0,
             split_value: F::zero(),
@@ -101,11 +111,34 @@ impl<F: Float, L: Label + std::fmt::Debug> TreeNode<F, L> {
             right_child: None,
             leaf_node: true,
             prediction,
+            depth,
         }
     }
 
     pub fn is_leaf(&self) -> bool {
         self.leaf_node
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    pub fn prediction(&self) -> Option<L> {
+        if self.is_leaf() {
+            return Some(self.prediction.clone());
+        } else {
+            None
+        }
+    }
+
+    /// Return both childs
+    pub fn childs(&self) -> Vec<&Option<Box<TreeNode<F, L>>>> {
+        vec![&self.left_child, &self.right_child]
+    }
+
+    /// Return the split and its impurity decrease
+    pub fn split(&self) -> (usize, F, F) {
+        (self.feature_idx, self.split_value, self.impurity_decrease)
     }
 
     fn fit<D: Data<Elem = F>, T: Labels<Elem = L>>(
@@ -127,7 +160,7 @@ impl<F: Float, L: Label + std::fmt::Debug> TreeNode<F, L> {
                 .map(|max_depth| depth > max_depth)
                 .unwrap_or(false)
         {
-            return Self::empty_leaf(prediction);
+            return Self::empty_leaf(prediction, depth);
         }
 
         // Find best split for current level
@@ -225,7 +258,7 @@ impl<F: Float, L: Label + std::fmt::Debug> TreeNode<F, L> {
         };
 
         if impurity_decrease < hyperparameters.min_impurity_decrease {
-            return Self::empty_leaf(prediction);
+            return Self::empty_leaf(prediction, depth);
         }
 
         let (best_feature_idx, best_split_value, _) = best.unwrap();
@@ -279,11 +312,47 @@ impl<F: Float, L: Label + std::fmt::Debug> TreeNode<F, L> {
             right_child,
             leaf_node,
             prediction,
+            depth,
+        }
+    }
+
+    /// Prune tree after fitting it
+    ///
+    /// This removes parts of the tree which results in the same prediction for
+    /// all sub-trees. This is called right after fit to ensure that the tree
+    /// is small.
+    fn prune(&mut self) -> Option<L> {
+        if self.is_leaf() {
+            return Some(self.prediction.clone());
+        }
+
+        let left = self.left_child.as_mut().and_then(|x| x.prune());
+        let right = self.right_child.as_mut().and_then(|x| x.prune());
+
+        match (left, right) {
+            (Some(x), Some(y)) => {
+                if x == y {
+                    self.prediction = x.clone();
+                    self.right_child = None;
+                    self.left_child = None;
+                    self.leaf_node = true;
+
+                    Some(x)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }
 
 /// A fitted decision tree model.
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(crate = "serde_crate")
+)]
 #[derive(Debug)]
 pub struct DecisionTree<F: Float, L: Label> {
     root_node: TreeNode<F, L>,
@@ -318,13 +387,16 @@ impl<'a, F: Float, L: Label + 'a + std::fmt::Debug, D: Data<Elem = F>, T: Labels
     /// Fit a decision tree using `hyperparamters` on the dataset consisting of
     /// a matrix of features `x` and an array of labels `y`.
     fn fit(&self, dataset: &Dataset<ArrayBase<D, Ix2>, T>) -> Self::Object {
+        self.validate().unwrap();
+
         let x = dataset.records();
         let all_idxs = RowMask::all(x.nrows());
         let sorted_indices: Vec<_> = (0..(x.ncols()))
             .map(|feature_idx| SortedIndex::of_array_column(&x, feature_idx))
             .collect();
 
-        let root_node = TreeNode::fit(&dataset, &all_idxs, &self, &sorted_indices, 0);
+        let mut root_node = TreeNode::fit(&dataset, &all_idxs, &self, &sorted_indices, 0);
+        root_node.prune();
 
         DecisionTree {
             root_node,
@@ -353,45 +425,27 @@ impl<F: Float, L: Label + std::fmt::Debug> DecisionTree<F, L> {
         }
     }
 
+    /// Create a node iterator
+    pub fn iter_nodes<'a>(&'a self) -> NodeIter<'a, F, L> {
+        // queue of nodes yet to explore
+        let queue = vec![&self.root_node];
+
+        NodeIter::new(queue)
+    }
+
     /// Return features_idx of this tree (BFT)
     ///
     pub fn features(&self) -> Vec<usize> {
-        // features visited and counted
-        let mut visited: HashSet<TreeNode<F, L>> = HashSet::new();
-        // queue of nodes yet to explore
-        let mut queue = vec![&self.root_node];
         // vector of feature indexes to return
-        let mut fitted_features: Vec<usize> = vec![];
+        let mut fitted_features = HashSet::new();
 
-        while let Some(node) = queue.pop() {
-            // count only internal nodes (where features are)
-            if !node.leaf_node {
-                // add feature index to list of used features
-                fitted_features.push(node.feature_idx);
-            }
-
-            // get children and enque them
-            let lc = match &node.left_child {
-                Some(child) => Some(child),
-                _ => None,
-            };
-            let rc = match &node.right_child {
-                Some(child) => Some(child),
-                _ => None,
-            };
-            let children = vec![lc, rc];
-            for child in children {
-                // extract TreeNode if any
-                if let Some(node) = child {
-                    if !visited.contains(&node) {
-                        visited.insert(*node.clone());
-                        queue.push(&node);
-                    }
-                }
+        for node in self.iter_nodes().filter(|node| !node.is_leaf()) {
+            if !fitted_features.contains(&node.feature_idx) {
+                fitted_features.insert(node.feature_idx);
             }
         }
 
-        fitted_features
+        fitted_features.into_iter().collect::<Vec<_>>()
     }
 
     /// Return the mean impurity decrease for each feature
@@ -399,25 +453,11 @@ impl<F: Float, L: Label + std::fmt::Debug> DecisionTree<F, L> {
         // total impurity decrease for each feature
         let mut impurity_decrease = vec![F::zero(); self.num_features];
         let mut num_nodes = vec![0; self.num_features];
-        // queue of nodes yet to explore
-        let mut queue = vec![&self.root_node];
-        // total impurity decrease
 
-        while let Some(node) = queue.pop() {
-            // count only internal nodes (where features are)
-            if !node.leaf_node {
-                // add feature impurity decrease to list
-                impurity_decrease[node.feature_idx] += node.impurity_decrease;
-                num_nodes[node.feature_idx] += 1;
-            }
-
-            if let Some(child) = &node.left_child {
-                queue.push(child);
-            }
-
-            if let Some(child) = &node.right_child {
-                queue.push(child);
-            }
+        for node in self.iter_nodes().filter(|node| !node.leaf_node) {
+            // add feature impurity decrease to list
+            impurity_decrease[node.feature_idx] += node.impurity_decrease;
+            num_nodes[node.feature_idx] += 1;
         }
 
         impurity_decrease
@@ -456,46 +496,18 @@ impl<F: Float, L: Label + std::fmt::Debug> DecisionTree<F, L> {
 
     /// Return max depth of the tree
     pub fn max_depth(&self) -> usize {
-        // queue of nodes yet to explore
-        let mut queue = vec![(0usize, &self.root_node)];
-        // max depth, i.e. maximal distance from root to leaf in the current tree
-        let mut max_depth = 0;
-
-        while let Some((current_depth, node)) = queue.pop() {
-            max_depth = usize::max(max_depth, current_depth);
-
-            if let Some(child) = &node.left_child {
-                queue.push((current_depth + 1, &child));
-            }
-
-            if let Some(child) = &node.right_child {
-                queue.push((current_depth + 1, &child));
-            }
-        }
-
-        max_depth
+        self.iter_nodes()
+            .fold(0, |max, node| usize::max(max, node.depth))
     }
 
+    /// Return the number of leaves in this tree
     pub fn num_leaves(&self) -> usize {
-        // queue of nodes yet to explore
-        let mut queue = vec![(0usize, &self.root_node)];
-        let mut num_leaves = 0;
+        self.iter_nodes().filter(|node| node.is_leaf()).count()
+    }
 
-        while let Some((current_depth, node)) = queue.pop() {
-            if node.is_leaf() {
-                num_leaves += 1;
-            }
-
-            if let Some(child) = &node.left_child {
-                queue.push((current_depth + 1, &child));
-            }
-
-            if let Some(child) = &node.right_child {
-                queue.push((current_depth + 1, &child));
-            }
-        }
-
-        num_leaves
+    /// Export to tikz
+    pub fn export_to_tikz<'a>(&'a self) -> Tikz<'a, F, L> {
+        Tikz::new(&self)
     }
 }
 
@@ -570,9 +582,8 @@ mod tests {
     use approx::assert_abs_diff_eq;
     use linfa::metrics::ToConfusionMatrix;
     use ndarray::{array, s, stack, Array, Array1, Array2, Axis};
-
-    use ndarray_rand::rand_distr::Uniform;
-    use ndarray_rand::RandomExt;
+    use ndarray_rand::{rand::SeedableRng, rand_distr::Uniform, RandomExt};
+    use rand_isaac::Isaac64Rng;
 
     #[test]
     fn prediction_for_rows_example() {
@@ -628,24 +639,50 @@ mod tests {
         );
 
         let targets = (0..50).map(|x| x < 25).collect::<Vec<_>>();
-
         let dataset = Dataset::new(data, targets);
 
         let model = DecisionTree::params().max_depth(Some(2)).fit(&dataset);
 
+        // we should only use feature index 8 here
         assert_eq!(&model.features(), &[8]);
         assert_eq!(
             &model.feature_importance(),
             &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
+
+        // check for perfect accuracy
+        let cm = model.predict(dataset.records()).confusion_matrix(&dataset);
+        assert!(cm.accuracy() == 1.0);
+    }
+
+    #[test]
+    /// Check that for random data the max depth is used
+    fn check_max_depth() {
+        let mut rng = Isaac64Rng::seed_from_u64(42);
+
+        // create very sparse data
+        let data = Array::random_using((50, 50), Uniform::new(-1., 1.), &mut rng);
+        let targets = (0..50).collect::<Vec<_>>();
+
+        let dataset = Dataset::new(data, targets);
+
+        // check that the provided depth is actually used
+        for max_depth in vec![1, 5, 10, 20] {
+            let model = DecisionTree::params()
+                .max_depth(Some(max_depth))
+                .min_impurity_decrease(1e-10f64)
+                .min_weight_split(1e-10)
+                .fit(&dataset);
+            assert_eq!(model.max_depth(), max_depth);
+        }
     }
 
     #[test]
     /// Small perfectly separable dataset test
     ///
-    /// This dataset of three elements is perfectly using the second feature.
+    /// This dataset of three elements is perfectly separable using the second feature.
     fn perfectly_separable_small() {
-        let data = array![[1., 2., 3.], [1., 2., 3.5], [1., 3., 4.]];
+        let data = array![[1., 2., 3.], [1., 2., 4.], [1., 3., 3.5]];
         let targets = array![0, 0, 1];
 
         let dataset = Dataset::new(data.clone(), targets);
@@ -655,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    /// Small toy dataset from sklearn
+    /// Small toy dataset from scikit-sklearn
     fn toy_dataset() {
         let data = array![
             [0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 1.0, -14.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0,],
@@ -685,9 +722,9 @@ mod tests {
 
         let targets = array![1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0];
 
-        let dataset = Dataset::new(data.clone(), targets);
+        let dataset = Dataset::new(data, targets);
         let model = DecisionTree::params().fit(&dataset);
-        let prediction = model.predict(data);
+        let prediction = model.predict(dataset.records());
 
         let cm = prediction.confusion_matrix(&dataset);
         assert!(cm.accuracy() > 0.95);
@@ -730,5 +767,15 @@ mod tests {
 
         let cm = prediction.confusion_matrix(&dataset);
         assert!(cm.accuracy() > 0.99);
+    }
+
+    #[test]
+    #[should_panic]
+    /// Check that a small or negative impurity decrease panics
+    fn panic_min_impurity_decrease() {
+        DecisionTree::<f64, bool>::params()
+            .min_impurity_decrease(0.0)
+            .validate()
+            .unwrap();
     }
 }
