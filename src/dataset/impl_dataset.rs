@@ -60,6 +60,7 @@ impl<R: Records, S: Targets> Dataset<R, S> {
     }
 
     pub fn with_weights(mut self, weights: Vec<f32>) -> Dataset<R, S> {
+        // TODO: Assert equal length?
         self.weights = weights;
 
         self

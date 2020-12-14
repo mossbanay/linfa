@@ -1,6 +1,6 @@
 /*
 use linfa_ensemble::random_forest::hyperparameters::MaxFeatures;
-use linfa_ensemble::{RandomForest, RandomForestParamsBuilder};
+use linfa_ensemble::RandomForest;
 use linfa_predictor::{Predictor, ProbabilisticPredictor};
 use linfa_trees::DecisionTreeParams;
 use ndarray::{Array, Array1};
