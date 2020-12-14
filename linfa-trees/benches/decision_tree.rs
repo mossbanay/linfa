@@ -28,11 +28,7 @@ fn decision_tree_bench(c: &mut Criterion) {
     let n_features = 4;
 
     // Use the default configuration
-<<<<<<< HEAD
-    let hyperparams = DecisionTree::params(n_classes);
-=======
     let hyperparams = DecisionTree::params();
->>>>>>> a09e0f9a6080a0c6a254b516e2a1792f313be633
 
     // Benchmark training time 10 times for each training sample size
     let mut group = c.benchmark_group("decision_tree");

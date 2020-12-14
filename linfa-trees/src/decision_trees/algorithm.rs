@@ -95,6 +95,8 @@ impl<F: Float, L: Label> Hash for TreeNode<F, L> {
     }
 }
 
+impl<F, L> Eq for TreeNode<F, L> {}
+
 impl<F, L> PartialEq for TreeNode<F, L> {
     fn eq(&self, other: &Self) -> bool {
         self.feature_idx == other.feature_idx
@@ -157,7 +159,7 @@ impl<F: Float, L: Label + std::fmt::Debug> TreeNode<F, L> {
         if (mask.nsamples as f32) < hyperparameters.min_weight_split
             || hyperparameters
                 .max_depth
-                .map(|max_depth| depth > max_depth)
+                .map(|max_depth| depth >= max_depth)
                 .unwrap_or(false)
         {
             return Self::empty_leaf(prediction, depth);
